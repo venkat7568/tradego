@@ -647,7 +647,15 @@ def get_pnl_engine(db_path: str = "./data/tradego.db") -> PnLEngine:
 
 if __name__ == "__main__":
     # Test the P&L engine
-    logging.basicConfig(level=logging.INFO)
+    import sys
+    import io
+
+    # Set UTF-8 encoding for print() on Windows
+    if sys.stdout.encoding != 'utf-8':
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+
+    from logging_config import setup_logging
+    setup_logging(__name__, log_file='./data/test_tradego.log')
 
     engine = get_pnl_engine("./data/test_tradego.db")
 
