@@ -84,6 +84,12 @@ class SignalEngine:
             news_score = self.data_layer.score_sentiment(news)
 
             current_price = indicators_intraday.get('close', 0)
+
+            # Validate current price
+            if current_price <= 0:
+                logger.warning(f"Invalid current price for {symbol}: {current_price}")
+                return None
+
             vwap = indicators_intraday.get('vwap', 0)
             rsi = indicators_intraday.get('rsi', 50)
             sma_20 = indicators_intraday.get('sma_20', 0)
@@ -177,6 +183,12 @@ class SignalEngine:
             indicators_intraday = self.data_layer.calculate_indicators(ohlcv_intraday)
 
             current_price = indicators_intraday.get('close', 0)
+
+            # Validate current price
+            if current_price <= 0:
+                logger.warning(f"Invalid current price for {symbol}: {current_price}")
+                return None
+
             high_20d = ohlcv_daily['high'].rolling(20).max().iloc[-2]  # Previous 20-day high
             volume = ohlcv_daily['volume'].iloc[-1]
             avg_volume = indicators_daily.get('volume_sma', 0)
@@ -290,6 +302,12 @@ class SignalEngine:
             indicators_daily = self.data_layer.calculate_indicators(ohlcv_daily)
 
             current_price = indicators_intraday.get('close', 0)
+
+            # Validate current price
+            if current_price <= 0:
+                logger.warning(f"Invalid current price for {symbol}: {current_price}")
+                return None
+
             rsi = indicators_intraday.get('rsi', 50)
             bb_lower = indicators_intraday.get('bb_lower', 0)
             bb_middle = indicators_intraday.get('bb_middle', 0)
