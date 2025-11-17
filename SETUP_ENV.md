@@ -235,6 +235,56 @@ These will override the defaults in `config.py`!
 
 ---
 
+## 📚 Optional Environment Variables
+
+The `.env.example` file contains **ALL** possible environment variables. Here are some useful optional ones:
+
+### 🔍 Advanced News Search (Optional)
+
+```env
+# Get free API key from: https://brave.com/search/api/
+BRAVE_API_KEY=your_brave_api_key_here
+
+# If not set, system uses only Moneycontrol scraping (still works great!)
+```
+
+### 📊 Logging Levels (Optional)
+
+```env
+# Control how much detail you see in logs (DEBUG, INFO, WARNING, ERROR)
+NEWS_LOG_LEVEL=WARNING
+TECH_LOG_LEVEL=INFO
+OPERATOR_LOG_LEVEL=INFO
+```
+
+### 💰 Brokerage Fee Customization (Optional)
+
+```env
+# Customize to match your broker's exact fee structure
+BROKERAGE_PER_ORDER=20.0
+EXCHANGE_TXN_BPS=3.25
+STT_DELIVERY_BPS=10.0
+STT_INTRADAY_BPS=2.5
+STAMP_BPS=1.5
+```
+
+### ⚙️ Upstox Technical Settings (Optional)
+
+```env
+# How often to refresh instrument list (hours)
+UPSTOX_INSTR_MAX_AGE_H=24
+
+# Prefer NSE-only for faster loading (1=yes, 0=all exchanges)
+UPSTOX_NSE_ONLY=1
+
+# Cache directory
+UPSTOX_CACHE_DIR=./.cache_upstox
+```
+
+**All of these are OPTIONAL!** The system works perfectly with just the required credentials (Upstox API + Email).
+
+---
+
 ## ❓ Troubleshooting
 
 ### Problem 1: `.env` file not found
