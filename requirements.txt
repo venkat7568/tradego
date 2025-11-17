@@ -1,31 +1,24 @@
-# TradeGo - Auto Trading System Requirements
 
 # Core dependencies
-pandas==2.1.4
-numpy==1.26.2
-requests==2.31.0
-beautifulsoup4==4.12.2
-
 # Environment variables
-python-dotenv==1.0.0
-
 # Flask for callback server and dashboard
-flask==3.0.0
-flask-cors==4.0.0
-
-# Upstox SDK (if available, otherwise use requests)
-# upstox-python-sdk==2.0.0
-
-# Technical analysis
-# ta-lib==0.4.28  # Optional, we use manual calculations (commented out as it's difficult to install)
-
 # Logging and utilities
-python-dateutil==2.8.2
-pytz==2023.3
-
 # Scheduling
-schedule==1.2.0
-
+# Technical analysis
 # Testing (optional)
-pytest==7.4.3
+# TradeGo - Auto Trading System Requirements
+# Upstox SDK (if available, otherwise use requests)
+# ta-lib==0.4.28  # Optional, we use manual calculations (commented out as it's difficult to install)
+# upstox-python-sdk==2.0.0
+beautifulsoup4==4.12.2
+flask-cors==4.0.0
+flask==3.0.0
+numpy==1.26.2
+pandas==2.1.4
 psutil==5.9.0
+pytest==7.4.3
+python-dateutil==2.8.2
+python-dotenv==1.0.0
+pytz==2023.3
+requests==2.31.0
+schedule==1.2.0
