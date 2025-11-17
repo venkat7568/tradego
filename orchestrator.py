@@ -94,10 +94,15 @@ class Orchestrator:
                 logger.info("Trading is DISABLED. Skipping cycle.")
                 return
 
-            # Check if market is open
-            if not self.is_market_open():
-                logger.info("Market is CLOSED. Skipping cycle.")
+            # Check if market is open - ONLY for LIVE modes
+            if self.trading_mode == 'LIVE' and not self.is_market_open():
+                logger.info("Market is CLOSED. Skipping cycle (LIVE mode).")
                 return
+
+            # BACKTEST mode - runs anytime, doesn't check market hours
+            if self.trading_mode == 'BACKTEST':
+                logger.info("Running in BACKTEST mode - processing historical data")
+
 
             # Get portfolio state
             portfolio = self.pnl_engine.get_daily_pnl()
@@ -278,7 +283,8 @@ class Orchestrator:
             if not self.trading_enabled:
                 return
 
-            if not self.is_market_open():
+            # Only check market hours for LIVE modes
+            if self.trading_mode == 'LIVE' and not self.is_market_open():
                 return
 
             open_trades = self.pnl_engine.get_open_trades()
@@ -342,6 +348,8 @@ class Orchestrator:
             logger.info(f"   Mode: 📝 LIVE (PAPER TRADING)")
         else:
             logger.info(f"   Mode: 📝 BACKTEST")
+            if self.settings.get('backtest_from') and self.settings.get('backtest_to'):
+                logger.info(f"   Date Range: {self.settings['backtest_from']} to {self.settings['backtest_to']}")
 
         # Display capital
         capital = self.get_capital()
@@ -359,11 +367,16 @@ class Orchestrator:
         schedule.every(30).seconds.do(self.position_monitor_loop)
         schedule.every().day.at("15:35").do(self.daily_summary)
 
-        logger.info("\n✅ System ready. Waiting for market hours...\n")
-
-        # Run immediately if market is open
-        if self.is_market_open():
+        # Different startup message based on mode
+        if self.trading_mode == 'BACKTEST':
+            logger.info("\n✅ BACKTEST mode - Running immediately with historical data!\n")
+            # Run immediately for backtest
             self.main_trading_loop()
+        else:
+            logger.info("\n✅ LIVE mode - Waiting for market hours (9:15 AM - 3:30 PM IST)...\n")
+            # Run immediately if market is open
+            if self.is_market_open():
+                self.main_trading_loop()
 
         # Main loop
         while True:
