@@ -28,3 +28,4 @@ schedule==1.2.0
 
 # Testing (optional)
 pytest==7.4.3
+psutil==5.9.0
