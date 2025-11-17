@@ -736,13 +736,347 @@ LIMIT 10;
 
 ---
 
+## Part 6: LEARNING & OPTIMIZATION SYSTEM 🧠
+
+### 6.1 Strategy Optimizer Module
+**File:** `strategy_optimizer.py` (~350 lines)
+
+**Purpose:** Continuously learn from both backtesting AND live trading to improve performance
+
+#### How It Learns:
+
+**1. Daily Performance Analysis**
+```python
+def analyze_daily_performance():
+    # Runs every night after market close
+
+    # Get today's trades
+    trades = pnl_engine.get_trades(date=today)
+
+    # Analyze by strategy
+    for strategy in ['news_momentum', 'technical_breakout', 'mean_reversion']:
+        strategy_trades = [t for t in trades if t.strategy == strategy]
+
+        metrics = {
+            'win_rate': calculate_win_rate(strategy_trades),
+            'avg_rr': calculate_avg_rr(strategy_trades),
+            'profit_factor': calculate_profit_factor(strategy_trades),
+            'sharpe': calculate_sharpe(strategy_trades),
+            'max_drawdown': calculate_max_dd(strategy_trades)
+        }
+
+        # Compare to backtested expectations
+        expected_metrics = load_backtest_results(strategy)
+
+        if metrics['win_rate'] < expected_metrics['win_rate'] * 0.8:
+            # Strategy underperforming - flag for review
+            log.warning(f"{strategy} win rate: {metrics['win_rate']:.1%} (expected {expected_metrics['win_rate']:.1%})")
+
+            # Analyze what went wrong
+            losing_trades = [t for t in strategy_trades if t.net_pnl < 0]
+            common_patterns = find_failure_patterns(losing_trades)
+
+            # Suggest parameter adjustments
+            adjustments = suggest_improvements(common_patterns)
+            save_optimization_report(strategy, metrics, adjustments)
+```
+
+**2. Parameter Auto-Tuning**
+```python
+def optimize_strategy_parameters():
+    # Runs weekly
+
+    # Get last 30 days of trades
+    trades = pnl_engine.get_trades(days=30)
+
+    # For each strategy, optimize parameters
+    for strategy in strategies:
+        # Current parameters
+        current_params = load_strategy_params(strategy)
+
+        # Example for news_momentum:
+        # {
+        #   'news_threshold': 0.6,
+        #   'rsi_max': 70,
+        #   'volume_multiplier': 1.5,
+        #   'min_confidence': 0.65
+        # }
+
+        # Simulate different parameter combinations
+        best_params = None
+        best_sharpe = -999
+
+        for params in generate_parameter_grid(current_params):
+            # Re-simulate last 30 days with new parameters
+            simulated_trades = backtest_with_params(strategy, params, days=30)
+            sharpe = calculate_sharpe(simulated_trades)
+
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_params = params
+
+        # If new parameters are better by >10%, update
+        if best_sharpe > calculate_sharpe(trades) * 1.1:
+            log.info(f"Updating {strategy} parameters (Sharpe: {best_sharpe:.2f})")
+            save_strategy_params(strategy, best_params)
+```
+
+**3. Market Regime Detection**
+```python
+def detect_market_regime():
+    # Runs every 4 hours
+
+    # Get Nifty 50 data (last 20 days)
+    nifty = get_ohlcv('NSE_INDEX|Nifty 50', '1d', 20)
+
+    # Calculate regime indicators
+    volatility = nifty['close'].pct_change().std()
+    adx = calculate_adx(nifty)
+    trend_slope = calculate_trend_slope(nifty)
+
+    # Classify regime
+    if adx > 25 and trend_slope > 0:
+        regime = 'STRONG_UPTREND'
+    elif adx > 25 and trend_slope < 0:
+        regime = 'STRONG_DOWNTREND'
+    elif volatility > 0.02:
+        regime = 'HIGH_VOLATILITY'
+    else:
+        regime = 'RANGE_BOUND'
+
+    # Adjust strategy weights based on regime
+    if regime == 'STRONG_UPTREND':
+        # Favor momentum strategies
+        strategy_weights = {
+            'news_momentum': 0.5,
+            'technical_breakout': 0.4,
+            'mean_reversion': 0.1
+        }
+    elif regime == 'RANGE_BOUND':
+        # Favor mean reversion
+        strategy_weights = {
+            'news_momentum': 0.2,
+            'technical_breakout': 0.2,
+            'mean_reversion': 0.6
+        }
+    # ... etc
+
+    save_regime_config(regime, strategy_weights)
+    log.info(f"Market regime: {regime}, adjusted strategy weights")
+```
+
+**4. Mistake Pattern Recognition**
+```python
+def analyze_losing_trades():
+    # Identify common mistakes
+
+    losing_trades = pnl_engine.get_trades(outcome='loss', days=30)
+
+    patterns = {
+        'entries': [],  # Entry timing issues
+        'exits': [],    # Exit timing issues
+        'risk': [],     # Risk sizing issues
+        'market': []    # Market condition issues
+    }
+
+    for trade in losing_trades:
+        # Check entry quality
+        if trade.mae / (trade.entry_price - trade.stop_loss) < 0.3:
+            # Stopped out quickly - entry was bad
+            patterns['entries'].append({
+                'trade_id': trade.trade_id,
+                'issue': 'Entered too early',
+                'symbol': trade.symbol,
+                'strategy': trade.strategy
+            })
+
+        # Check if stop-loss was too tight
+        if trade.exit_reason == 'STOP_LOSS' and trade.mfe > abs(trade.gross_pnl) * 2:
+            # Price went in our favor then hit SL - SL was too tight
+            patterns['exits'].append({
+                'trade_id': trade.trade_id,
+                'issue': 'Stop-loss too tight',
+                'symbol': trade.symbol,
+                'atr_multiple': (trade.entry_price - trade.stop_loss) / calculate_atr(trade.symbol)
+            })
+
+        # Check if position size was too large
+        if abs(trade.net_pnl) / trade.risk_amount > 3:
+            # Lost more than 3x intended risk - position too large
+            patterns['risk'].append({
+                'trade_id': trade.trade_id,
+                'issue': 'Position size too large',
+                'symbol': trade.symbol
+            })
+
+    # Generate recommendations
+    recommendations = []
+
+    if len(patterns['entries']) > len(losing_trades) * 0.4:
+        recommendations.append("40% of losses from early entries - consider waiting for confirmation")
+
+    if len(patterns['exits']) > len(losing_trades) * 0.3:
+        avg_atr_multiple = sum(p['atr_multiple'] for p in patterns['exits']) / len(patterns['exits'])
+        recommendations.append(f"Stop-losses too tight (avg {avg_atr_multiple:.1f} ATR) - increase to 1.5-2.0 ATR")
+
+    save_mistake_analysis(patterns, recommendations)
+    return recommendations
+```
+
+**5. Live vs Backtest Comparison**
+```python
+def compare_live_vs_backtest():
+    # Detect if live trading differs from backtest
+
+    # Get live performance (last 30 days)
+    live_trades = pnl_engine.get_trades(days=30)
+    live_metrics = calculate_metrics(live_trades)
+
+    # Get backtest results
+    backtest_metrics = load_backtest_results('all_strategies')
+
+    # Compare key metrics
+    comparison = {
+        'win_rate': {
+            'live': live_metrics['win_rate'],
+            'backtest': backtest_metrics['win_rate'],
+            'diff': live_metrics['win_rate'] - backtest_metrics['win_rate']
+        },
+        'avg_rr': {
+            'live': live_metrics['avg_rr'],
+            'backtest': backtest_metrics['avg_rr'],
+            'diff': live_metrics['avg_rr'] - backtest_metrics['avg_rr']
+        },
+        'sharpe': {
+            'live': live_metrics['sharpe'],
+            'backtest': backtest_metrics['sharpe'],
+            'diff': live_metrics['sharpe'] - backtest_metrics['sharpe']
+        }
+    }
+
+    # Alert if significant deviation
+    for metric, values in comparison.items():
+        if abs(values['diff']) > values['backtest'] * 0.3:  # 30% deviation
+            alert(f"⚠️ Live {metric} deviates {values['diff']:.1%} from backtest")
+
+            # Analyze why
+            if metric == 'win_rate' and values['diff'] < 0:
+                # Win rate lower in live trading
+                reasons = analyze_win_rate_drop(live_trades)
+                log.warning(f"Win rate drop reasons: {reasons}")
+
+    return comparison
+```
+
+### 6.2 Adaptive Learning Features
+
+**What the System Learns:**
+
+1. **Strategy Performance by Market Regime**
+   - Tracks which strategies work best in uptrends, downtrends, range-bound markets
+   - Automatically shifts capital to best-performing strategy
+
+2. **Optimal Entry Timing**
+   - Learns if entering too early or too late
+   - Adjusts confirmation requirements (e.g., wait for 2 bars instead of 1)
+
+3. **Stop-Loss Optimization**
+   - Finds ideal ATR multiples for each stock (volatile stocks need wider stops)
+   - Adjusts per-symbol stop-loss settings
+
+4. **Position Sizing**
+   - Learns which symbols/strategies deserve more capital
+   - Increases allocation to high-win-rate strategies
+
+5. **Time-of-Day Patterns**
+   - Identifies if certain strategies work better in morning vs afternoon
+   - Avoids trading during low-probability times
+
+6. **Symbol Blacklisting**
+   - Auto-blacklists symbols with consistent losses
+   - Tracks "difficult" stocks (high slippage, false breakouts)
+
+**Learning Frequency:**
+- **Real-time:** Position monitoring, P&L updates
+- **Daily:** Strategy performance analysis, mistake patterns
+- **Weekly:** Parameter optimization, regime detection
+- **Monthly:** Full backtest comparison, strategy rebalancing
+
+**Safety Mechanisms:**
+- Parameter changes require 30-day backtest validation
+- Maximum 10% parameter adjustment per week
+- Human approval for major changes (via alert)
+- Rollback feature if performance degrades
+
+---
+
+## Part 7: Margin Trading Details (Intraday)
+
+### 7.1 Margin Calculation
+
+**Upstox Margin for Intraday (Product = "I"):**
+- Equity delivery: 1x (₹10,000 buys ₹10,000 worth)
+- Equity intraday: 5x leverage (₹10,000 buys ₹50,000 worth)
+
+**Capital Allocation:**
+```
+Total Capital: ₹10,00,000
+
+Intraday Pool: 70% = ₹7,00,000
+  → With 5x margin = ₹35,00,000 buying power
+
+Swing Pool: 30% = ₹3,00,000
+  → No margin = ₹3,00,000 buying power
+```
+
+**Risk Management with Margin:**
+```python
+def calculate_intraday_position_size(signal, available_capital):
+    # Risk 0.5-1% of TOTAL capital, not margin
+    total_capital = 10_00_000
+    risk_amount = total_capital * 0.01  # ₹10,000 max risk per trade
+
+    # Calculate quantity based on stop-loss
+    risk_per_share = signal.entry_price - signal.stop_loss
+    quantity = int(risk_amount / risk_per_share)
+
+    # Check margin requirement
+    position_value = quantity * signal.entry_price
+    margin_required = position_value / 5  # 5x leverage
+
+    if margin_required > available_capital:
+        # Reduce quantity to fit margin
+        quantity = int((available_capital * 5) / signal.entry_price)
+
+    return quantity
+```
+
+**Example:**
+```
+Signal: BUY RELIANCE at ₹2,500
+Stop-Loss: ₹2,475 (₹25 risk per share)
+Risk Amount: ₹10,000
+
+Quantity: ₹10,000 / ₹25 = 400 shares
+Position Value: 400 × ₹2,500 = ₹10,00,000
+Margin Required: ₹10,00,000 / 5 = ₹2,00,000
+
+If available margin = ₹2,00,000 ✅ (take full 400 shares)
+If available margin = ₹1,00,000 ❌ (reduce to 200 shares)
+```
+
+**Forced Square-Off:**
+- All intraday positions MUST close by 3:20 PM
+- System auto-sells at 3:20 PM regardless of P&L
+- No overnight holding for "I" product
+
+---
+
 ## Questions for You
 
-1. **Capital Allocation:** What % do you want for intraday vs swing trading?
-   - Suggestion: 70% intraday, 30% swing
+1. **Capital Allocation:** ✅ Confirmed - 70% intraday (with margin), 30% swing
 
-2. **Risk Tolerance:** Comfortable with 2% max daily loss circuit breaker?
-   - Or do you want tighter (1%) or looser (3%)?
+2. **Risk Tolerance:** ✅ Confirmed - 2% max daily loss circuit breaker
 
 3. **Watchlist:** Do you have preferred stocks/sectors?
    - Or should I use Nifty 50 + liquid midcaps?
@@ -752,6 +1086,10 @@ LIMIT 10;
 5. **Technology:** Keep Flask UI or switch to React for better dashboard?
 
 6. **Database:** SQLite is fine for single user. Need PostgreSQL for scale?
+
+7. **Learning Frequency:** Should parameter optimization happen weekly or daily?
+
+8. **Manual Override:** Do you want ability to manually place trades (outside the system)?
 
 ---
 
