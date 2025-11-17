@@ -105,6 +105,14 @@ class DataLayer:
         self._symbol_cache = {}  # Cache for symbol resolution
         self._ohlcv_cache = {}   # Cache for OHLCV data
         self._news_cache = {}     # Cache for news
+
+        # Load settings to check mode
+        try:
+            from settings_manager import load_settings
+            self.settings = load_settings()
+        except:
+            self.settings = {'mode': 'BACKTEST'}  # Default
+
         logger.info("Data Layer initialized")
 
     # ==================== WATCHLIST MANAGEMENT ====================
@@ -113,12 +121,30 @@ class DataLayer:
         """
         Get hybrid watchlist: Nifty 50 + liquid midcaps + news-discovered symbols
         Returns top 30 most relevant symbols
+
+        BACKTEST mode: Uses static Nifty 50 list (no news scraping)
+        LIVE mode: Includes news discovery and ranking
         """
-        logger.info("Building hybrid watchlist...")
+        # Reload settings to get current mode
+        try:
+            from settings_manager import load_settings
+            self.settings = load_settings()
+        except:
+            self.settings = {'mode': 'BACKTEST'}
+
+        mode = self.settings.get('mode', 'BACKTEST')
+        logger.info(f"Building hybrid watchlist (Mode: {mode})...")
 
         # 1. Core watchlist (always included)
         core_symbols = self.NIFTY_50_SYMBOLS.copy()
 
+        # BACKTEST mode: Use static watchlist (faster, no internet needed)
+        if mode == 'BACKTEST':
+            logger.info(f"BACKTEST mode: Using top 10 Nifty 50 stocks")
+            # Return top 10 liquid stocks for faster backtesting
+            return core_symbols[:10]
+
+        # LIVE mode: Full discovery
         # 2. Add liquid midcaps
         core_symbols.extend(self.LIQUID_MIDCAPS)
 
