@@ -6,7 +6,7 @@ numpy==1.26.2
 requests==2.31.0
 beautifulsoup4==4.12.2
 
-# Flask for dashboard
+# Flask for callback server and dashboard
 flask==3.0.0
 flask-cors==4.0.0
 
@@ -14,7 +14,7 @@ flask-cors==4.0.0
 # upstox-python-sdk==2.0.0
 
 # Technical analysis
-ta-lib==0.4.28  # Optional, we use manual calculations
+# ta-lib==0.4.28  # Optional, we use manual calculations (commented out as it's difficult to install)
 
 # Logging and utilities
 python-dateutil==2.8.2
