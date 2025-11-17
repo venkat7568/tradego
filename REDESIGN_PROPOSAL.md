@@ -188,17 +188,88 @@ class DataLayer:
         # - Time decay: exponential (4-hour half-life for intraday)
         # - Return: -1.0 to +1.0
 
+    # DYNAMIC WATCHLIST DISCOVERY (NEW!)
+    def discover_symbols_from_news() -> List[str]
+        # Runs every 30 minutes during market hours
+
+        # 1. Scrape trending news from multiple sources
+        sources = [
+            'https://www.moneycontrol.com/news/business/stocks/',
+            'https://economictimes.indiatimes.com/markets/stocks/news',
+            'https://www.nseindia.com/market-data/live-market-indices',
+            # Brave API for "India stock market news today"
+        ]
+
+        # 2. Extract company names and stock symbols from headlines
+        all_headlines = scrape_all_sources(sources)
+        extracted_symbols = []
+
+        for headline in all_headlines:
+            # Extract: "Reliance", "TCS", "HDFC Bank", "Adani Green"
+            companies = extract_company_names(headline)
+
+            # Resolve to NSE/BSE symbols
+            for company in companies:
+                symbol = resolve_symbol(company)
+                if symbol:
+                    extracted_symbols.append(symbol)
+
+        # 3. Filter by liquidity (only liquid stocks)
+        liquid_symbols = []
+        for symbol in extracted_symbols:
+            volume_data = get_avg_volume(symbol, days=20)
+
+            if volume_data.avg_volume > 100_000:  # Min 1 lakh shares/day
+                # Check if tradeable
+                if is_tradeable(symbol):  # Not suspended, not upper/lower circuit
+                    liquid_symbols.append(symbol)
+
+        # 4. Deduplicate and return
+        return list(set(liquid_symbols))
+
     # Instrument Management
     def get_watchlist() -> List[str]
-        # - Static list (50 liquid stocks)
-        # - Dynamic additions from news
-        # - Liquidity filter: avg volume > 1M shares/day
-        # - Returns: NSE_EQ symbols
+        # HYBRID APPROACH:
+        # 1. Core watchlist (always included)
+        core_symbols = [
+            'NSE_EQ|RELIANCE-EQ',
+            'NSE_EQ|TCS-EQ',
+            'NSE_EQ|INFY-EQ',
+            'NSE_EQ|HDFCBANK-EQ',
+            'NSE_EQ|ICICIBANK-EQ',
+            # ... top 20 liquid stocks
+        ]
+
+        # 2. Dynamic symbols from news (refreshed every 30 min)
+        news_symbols = discover_symbols_from_news()
+
+        # 3. Merge (prioritize news symbols for freshness)
+        all_symbols = news_symbols + core_symbols
+
+        # 4. Limit to top 30 (avoid overload)
+        # Sort by: news mentions (recent 2 hours) + volume
+        ranked_symbols = rank_by_relevance(all_symbols)
+
+        return ranked_symbols[:30]
 
     def resolve_symbol(hint) -> str | None
         # - Current UpstoxTechnicalClient.resolve()
         # - Add fuzzy matching
         # - Cache results for 24h
+
+    def extract_company_names(text) -> List[str]
+        # Regex + NLP to find company names
+        # Examples:
+        # "Reliance Industries surges 3%" → ["Reliance"]
+        # "TCS Q4 results beat estimates" → ["TCS"]
+        # "HDFC Bank, ICICI Bank rally" → ["HDFC Bank", "ICICI Bank"]
+
+    def rank_by_relevance(symbols) -> List[str]
+        # Score each symbol:
+        # - News mentions in last 2 hours (weight: 0.5)
+        # - Avg daily volume (weight: 0.3)
+        # - Price change % today (weight: 0.2)
+        # Sort by score descending
 ```
 
 **Quality Checks:**
@@ -1090,6 +1161,373 @@ If available margin = ₹1,00,000 ❌ (reduce to 200 shares)
 7. **Learning Frequency:** Should parameter optimization happen weekly or daily?
 
 8. **Manual Override:** Do you want ability to manually place trades (outside the system)?
+
+---
+
+## Part 8: DEPLOYMENT & 24/7 OPERATION 🚀
+
+### 8.1 Why VPS Instead of Shared Hosting
+
+**❌ PHP/Shared Hosting (Hostinger) Won't Work:**
+- Shared hosting kills long-running processes
+- PHP timeouts (30-60 seconds max)
+- No technical indicator libraries in PHP
+- Upstox has no PHP SDK
+- Can't run background jobs 24/7
+
+**✅ VPS with Python is Better:**
+- Runs 24/7 without stopping
+- Full control over process
+- Auto-restart on crash
+- Better performance for calculations
+- Access from anywhere (phone, laptop, tablet)
+
+### 8.2 Recommended Deployment Options
+
+#### **Option 1: VPS with Systemd (Full Control)**
+
+**Best VPS Providers:**
+| Provider | Cost | RAM | Storage | Location |
+|----------|------|-----|---------|----------|
+| DigitalOcean | $6/month | 1GB | 25GB SSD | Bangalore |
+| Linode | $5/month | 1GB | 25GB SSD | Mumbai |
+| Vultr | $5/month | 1GB | 25GB SSD | Mumbai |
+| AWS Lightsail | $5/month | 512MB | 20GB SSD | Mumbai |
+
+**One-Time Setup (Automated):**
+```bash
+# 1. Clone repo on VPS
+git clone https://github.com/your-username/tradego.git
+cd tradego
+
+# 2. Run auto-setup script (I'll create this)
+chmod +x deploy.sh
+./deploy.sh
+
+# What it does:
+# - Installs Python 3.11
+# - Installs dependencies (pip install -r requirements.txt)
+# - Creates systemd service (auto-start on boot)
+# - Sets up firewall (port 5000 for dashboard)
+# - Configures auto-restart on crash
+# - Sets up log rotation
+
+# 3. Start the service
+sudo systemctl start tradego
+sudo systemctl enable tradego  # Auto-start on reboot
+
+# 4. Done! Access dashboard at:
+# http://your-vps-ip:5000
+```
+
+**Systemd Service Configuration:**
+```ini
+# /etc/systemd/system/tradego.service
+[Unit]
+Description=TradeGo Auto Trading System
+After=network.target
+
+[Service]
+Type=simple
+User=tradego
+WorkingDirectory=/home/tradego/tradego
+ExecStart=/usr/bin/python3 orchestrator.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/tradego/output.log
+StandardError=append:/var/log/tradego/error.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Benefits:**
+- ✅ Runs forever (even when you close browser)
+- ✅ Auto-restart if crash
+- ✅ Auto-start on server reboot
+- ✅ Logs saved to `/var/log/tradego/`
+- ✅ Can SSH in anytime to check status
+
+**Management Commands:**
+```bash
+# Start trading
+sudo systemctl start tradego
+
+# Stop trading
+sudo systemctl stop tradego
+
+# Restart
+sudo systemctl restart tradego
+
+# Check status
+sudo systemctl status tradego
+
+# View live logs
+tail -f /var/log/tradego/output.log
+```
+
+---
+
+#### **Option 2: Railway.app (Easiest!)**
+
+**No server management needed:**
+
+**Setup (5 minutes):**
+1. Push code to GitHub
+2. Go to railway.app
+3. Click "New Project" → "Deploy from GitHub"
+4. Select tradego repo
+5. Click "Deploy"
+6. Done!
+
+**Railway Dashboard:**
+```
+┌─────────────────────────────────────┐
+│  Railway Project: tradego           │
+├─────────────────────────────────────┤
+│  Status: ● Running                  │
+│  URL: https://tradego-xxx.up.railway.app │
+│  Logs: [View Live Logs]            │
+│  Restart: [Restart Service]        │
+│  Stop: [Stop Service]               │
+└─────────────────────────────────────┘
+```
+
+**Pricing:**
+- Free tier: 500 hours/month (enough for testing)
+- Hobby plan: $5/month (unlimited hours)
+
+**Benefits:**
+- ✅ Zero configuration
+- ✅ Auto-deploy on git push
+- ✅ Built-in monitoring
+- ✅ SSL certificate (HTTPS) automatic
+- ✅ 99.9% uptime
+
+---
+
+### 8.3 Web Dashboard Design
+
+**Dashboard URL:** `http://your-server:5000` (accessible from anywhere)
+
+**Main Dashboard:**
+```
+┌────────────────────────────────────────────────────────────────┐
+│  TRADEGO - Auto Trading System                     [Logout]    │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  SYSTEM STATUS                                                  │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  Status: ● RUNNING     Market: OPEN                     │  │
+│  │  Uptime: 12h 45m       Last Scan: 2 minutes ago         │  │
+│  │                                                          │  │
+│  │  [  STOP TRADING  ]    [  RESTART  ]    [  VIEW LOGS  ] │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  TODAY'S PERFORMANCE                                            │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  Total P&L: ₹12,450 (+1.24%)  ↗                         │  │
+│  │  ├─ Intraday: ₹11,600 (+1.16%)                          │  │
+│  │  └─ Swing: ₹850 (+0.28%)                                │  │
+│  │                                                          │  │
+│  │  Trades: 8 (6 wins, 2 losses)  Win Rate: 75%           │  │
+│  │  Capital Deployed: ₹3.45L (34.5%)                       │  │
+│  │  Portfolio Heat: 1.8% (OK)                               │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  OPEN POSITIONS (4)                      [Auto-refresh: ON]    │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ Symbol      | Entry  | Current | P&L    | Time  | Action│  │
+│  ├──────────────────────────────────────────────────────────┤  │
+│  │ RELIANCE    | ₹2,500 | ₹2,518  | +₹3,600| 2h 15m| [EXIT]│  │
+│  │ TCS         | ₹3,800 | ₹3,790  | -₹500  | 1h 30m| [EXIT]│  │
+│  │ ADANIGREEN  | ₹1,245 | ₹1,312  | +₹6,700| 12 days [EXIT]│  │
+│  │ HDFCBANK    | ₹1,580 | ₹1,592  | +₹1,200| 5 days| [EXIT]│  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  RECENT SIGNALS (Last 15 minutes)                              │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ ✓ BUY INFY @ ₹1,450 (News Momentum, Conf: 0.78)         │  │
+│  │ ✗ SKIP TATASTEEL (Confidence too low: 0.42)             │  │
+│  │ ✓ BUY RELIANCE @ ₹2,500 (Technical Breakout, Conf: 0.81)│  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  [View Trade History] [View Strategy Performance] [Settings]   │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Features:**
+1. **Start/Stop Buttons**
+   - Click "STOP" → System stops trading (closes no positions, just stops new trades)
+   - Click "START" → Resumes trading
+   - Process keeps running in background
+
+2. **Real-Time Updates**
+   - Auto-refresh every 10 seconds
+   - Live P&L updates
+   - Position changes
+
+3. **Manual Controls**
+   - [EXIT] button on each position (manual square-off)
+   - Emergency "Close All Positions" button
+   - Pause/Resume trading
+
+4. **Logs Viewer**
+   - Click "VIEW LOGS" → See last 100 lines
+   - Filter by level (INFO, WARNING, ERROR)
+   - Download full logs
+
+5. **Settings Panel**
+   ```
+   ┌─────────────────────────────────────┐
+   │  SETTINGS                           │
+   ├─────────────────────────────────────┤
+   │  Risk Management:                   │
+   │  Max Daily Loss: [2]% [Update]      │
+   │  Max Open Positions: [5] [Update]   │
+   │  Portfolio Heat Limit: [3]% [Update]│
+   │                                     │
+   │  Capital Allocation:                │
+   │  Intraday: [70]%  Swing: [30]%     │
+   │  [Update]                           │
+   │                                     │
+   │  Strategy Weights:                  │
+   │  News Momentum: [40]%               │
+   │  Technical Breakout: [40]%          │
+   │  Mean Reversion: [20]%              │
+   │  [Update]                           │
+   │                                     │
+   │  Trading Hours:                     │
+   │  Start: [09:15] Stop: [15:15]      │
+   │  [Update]                           │
+   └─────────────────────────────────────┘
+   ```
+
+6. **Mobile Responsive**
+   - Works on phone (check P&L on the go)
+   - Push notifications (optional, via Telegram)
+
+---
+
+### 8.4 How It Stays Running 24/7
+
+**Process Flow:**
+```
+┌─────────────────────────────────────────────────┐
+│  You close laptop/browser                       │
+│  ↓                                              │
+│  System keeps running on VPS                    │
+│  ↓                                              │
+│  Orchestrator runs every 15 min (9:15-3:30 PM) │
+│  ↓                                              │
+│  Position monitor runs every 30 seconds         │
+│  ↓                                              │
+│  If crash → Systemd auto-restarts in 10 sec    │
+│  ↓                                              │
+│  If server reboots → Auto-starts on boot       │
+│  ↓                                              │
+│  Logs everything to /var/log/tradego/           │
+└─────────────────────────────────────────────────┘
+```
+
+**Your Workflow:**
+```
+Morning (9:00 AM):
+- Open dashboard on phone/laptop
+- Check system status (should be green)
+- Click "START TRADING" if not already running
+- Close browser/phone
+
+During Day:
+- System trades automatically
+- (Optional) Check dashboard to see P&L
+- Get alerts on Telegram (if enabled)
+
+Evening (3:30 PM):
+- Open dashboard
+- Review today's trades
+- Check performance metrics
+- Close browser (system keeps running for tomorrow)
+
+Next Day:
+- System auto-starts at 9:15 AM
+- Repeat
+```
+
+**Monitoring:**
+- Email/Telegram alerts for:
+  - Daily P&L report (3:30 PM)
+  - Circuit breaker triggered (-2% loss)
+  - System errors/crashes
+  - Large winning/losing trades (>₹5,000)
+
+---
+
+### 8.5 Deployment Script (Auto-Setup)
+
+**I'll create `deploy.sh`:**
+```bash
+#!/bin/bash
+
+echo "TradeGo Auto-Deploy Script"
+echo "============================"
+
+# 1. Update system
+sudo apt update && sudo apt upgrade -y
+
+# 2. Install Python 3.11
+sudo apt install python3.11 python3-pip -y
+
+# 3. Install dependencies
+pip3 install -r requirements.txt
+
+# 4. Create database
+python3 -c "from pnl_engine import create_database; create_database()"
+
+# 5. Create systemd service
+sudo tee /etc/systemd/system/tradego.service > /dev/null <<EOF
+[Unit]
+Description=TradeGo Auto Trading System
+After=network.target
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=$(pwd)
+ExecStart=/usr/bin/python3 orchestrator.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/tradego/output.log
+StandardError=append:/var/log/tradego/error.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 6. Create log directory
+sudo mkdir -p /var/log/tradego
+sudo chown $USER:$USER /var/log/tradego
+
+# 7. Reload systemd
+sudo systemctl daemon-reload
+sudo systemctl enable tradego
+
+# 8. Start service
+sudo systemctl start tradego
+
+echo "✅ Deployment complete!"
+echo "Dashboard: http://$(curl -s ifconfig.me):5000"
+echo "Status: sudo systemctl status tradego"
+echo "Logs: tail -f /var/log/tradego/output.log"
+```
+
+**Usage:**
+```bash
+chmod +x deploy.sh
+./deploy.sh
+# Wait 2 minutes
+# Access dashboard at http://your-vps-ip:5000
+```
 
 ---
 
