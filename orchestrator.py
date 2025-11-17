@@ -5,34 +5,29 @@ Runs 24/7, executes trades during market hours, monitors positions
 
 import time
 import schedule
-import logging
 from datetime import datetime, time as dt_time
 from typing import List
-import sys
 
+from logging_config import setup_logging
 from pnl_engine import get_pnl_engine, Trade
 from data_layer import get_data_layer
 from signal_engine import get_signal_engine
 from risk_manager import get_risk_manager, RiskLimits
 from upstox_integration import get_upstox_integration
+import config
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('./data/tradego.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
-logger = logging.getLogger(__name__)
+# Setup logging with UTF-8 support
+logger = setup_logging(__name__)
 
 
 class Orchestrator:
     """Main trading system orchestrator"""
 
-    def __init__(self):
+    def __init__(self, trading_mode: str = None):
+        # Trading mode: LIVE or BACKTEST
+        self.trading_mode = trading_mode or config.TRADING_MODE
+        self.fetch_live_balance = config.FETCH_LIVE_BALANCE if self.trading_mode == 'LIVE' else False
+
         # Initialize all modules
         self.pnl_engine = get_pnl_engine()
         self.data_layer = get_data_layer()
@@ -43,10 +38,40 @@ class Orchestrator:
         # Trading state
         self.trading_enabled = True
         self.last_scan_time = None
+        self.live_balance = None  # Will be fetched from broker in LIVE mode
 
         logger.info("=" * 60)
-        logger.info("TradeGo Orchestrator Initialized")
+        logger.info(f"TradeGo Orchestrator Initialized - Mode: {self.trading_mode}")
         logger.info("=" * 60)
+
+    def fetch_live_balance(self) -> float:
+        """
+        Fetch available balance from Upstox broker
+        Returns the available margin for trading
+        """
+        if self.trading_mode != 'LIVE' or not self.fetch_live_balance:
+            return config.TOTAL_CAPITAL
+
+        try:
+            operator = self.upstox_integration.get_operator()
+            if not operator:
+                logger.warning("⚠️  Unable to get Upstox operator. Using config capital.")
+                return config.TOTAL_CAPITAL
+
+            funds = operator.get_funds()
+            if funds.get('status') == 'ok':
+                equity = funds.get('equity', {})
+                available = equity.get('available_margin', 0)
+                logger.info(f"💰 Live balance fetched: ₹{available:,.2f}")
+                self.live_balance = available
+                return available
+            else:
+                logger.warning(f"⚠️  Failed to fetch funds: {funds.get('error')}")
+                return config.TOTAL_CAPITAL
+
+        except Exception as e:
+            logger.error(f"❌ Error fetching live balance: {e}")
+            return config.TOTAL_CAPITAL
 
     def is_market_open(self) -> bool:
         """Check if market is open"""
@@ -175,13 +200,55 @@ class Orchestrator:
 
     def place_trade(self, signal, position_size) -> bool:
         """
-        Place trade with Upstox
+        Place trade - LIVE mode places real orders, BACKTEST mode creates paper trades
         Returns True if successful
         """
         try:
-            # For now, create trade in database (paper trading mode)
-            # TODO: Integrate real Upstox order placement
+            entry_order_id = None
+            target_order_id = None
+            sl_order_id = None
 
+            # LIVE MODE: Place real order through Upstox
+            if self.trading_mode == 'LIVE':
+                logger.info(f"  🔴 LIVE MODE: Placing real order on Upstox...")
+
+                operator = self.upstox_integration.get_operator()
+                if not operator:
+                    logger.error("  ❌ Cannot place live order: Upstox operator not available")
+                    return False
+
+                # Place order with mandatory stop-loss
+                result = operator.place_order(
+                    symbol=signal.symbol,
+                    side=signal.direction,
+                    qty=position_size.quantity,
+                    price=signal.entry_price if signal.entry_price else None,
+                    order_type='MARKET',  # Can be made configurable
+                    product=signal.product,
+                    stop_loss=signal.stop_loss,
+                    target=signal.target,
+                    live=True,  # Execute real order
+                    tag=f"{signal.strategy}"
+                )
+
+                if result.get('status') == 'success':
+                    entry_order_id = result.get('entry', {}).get('order_id')
+                    target_order_id = result.get('exits', {}).get('target', {}).get('order_id')
+                    sl_order_id = result.get('exits', {}).get('stop_loss', {}).get('order_id')
+
+                    logger.info(f"  ✅ Live order placed successfully!")
+                    logger.info(f"     Entry Order ID: {entry_order_id}")
+                    logger.info(f"     Target Order ID: {target_order_id}")
+                    logger.info(f"     SL Order ID: {sl_order_id}")
+                else:
+                    logger.error(f"  ❌ Live order failed: {result.get('error')}")
+                    return False
+
+            else:
+                # BACKTEST MODE: Paper trading
+                logger.info(f"  📝 BACKTEST MODE: Creating paper trade...")
+
+            # Create trade record in database (for both LIVE and BACKTEST)
             trade = self.pnl_engine.create_trade(
                 symbol=signal.symbol,
                 strategy=signal.strategy,
@@ -194,14 +261,17 @@ class Orchestrator:
                 risk_amount=position_size.risk_amount,
                 confidence=signal.confidence,
                 news_score=signal.news_score,
-                tech_score=signal.tech_score
+                tech_score=signal.tech_score,
+                entry_order_id=entry_order_id,
+                target_order_id=target_order_id,
+                sl_order_id=sl_order_id
             )
 
-            logger.info(f"  ✅ Trade created: {trade.trade_id}")
+            logger.info(f"  ✅ Trade recorded: {trade.trade_id} | Mode: {self.trading_mode}")
             return True
 
         except Exception as e:
-            logger.error(f"  ❌ Error placing trade: {e}")
+            logger.error(f"  ❌ Error placing trade: {e}", exc_info=True)
             return False
 
     def position_monitor_loop(self):
@@ -266,7 +336,15 @@ class Orchestrator:
     def run(self):
         """Start the orchestrator"""
         logger.info("\n🚀 TradeGo System Starting...")
-        logger.info(f"   Capital: ₹{self.risk_manager.limits.total_capital:,.0f}")
+        logger.info(f"   Mode: {'🔴 LIVE TRADING' if self.trading_mode == 'LIVE' else '📝 BACKTEST (Paper Trading)'}")
+
+        # Fetch live balance if in LIVE mode
+        if self.trading_mode == 'LIVE' and self.fetch_live_balance:
+            live_capital = self.fetch_live_balance()
+            logger.info(f"   Capital: ₹{live_capital:,.2f} (fetched from Upstox)")
+        else:
+            logger.info(f"   Capital: ₹{self.risk_manager.limits.total_capital:,.0f} (config)")
+
         logger.info(f"   Intraday: {self.risk_manager.limits.intraday_allocation:.0%}")
         logger.info(f"   Swing: {self.risk_manager.limits.swing_allocation:.0%}")
         logger.info(f"   Max Positions: {self.risk_manager.limits.max_open_positions}")

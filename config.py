@@ -8,8 +8,16 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+# ==================== TRADING MODE ====================
+# Trading mode: 'LIVE' for real trading, 'BACKTEST' for paper trading / backtesting
+TRADING_MODE = os.getenv('TRADING_MODE', 'BACKTEST')  # Default to BACKTEST for safety
+
+# In LIVE mode, fetch balance from broker
+# In BACKTEST mode, use the TOTAL_CAPITAL value below
+FETCH_LIVE_BALANCE = os.getenv('FETCH_LIVE_BALANCE', 'False').lower() == 'true'
+
 # Capital & Risk Settings
-TOTAL_CAPITAL = 1_000_000  # ₹10 Lakh
+TOTAL_CAPITAL = 1_000_000  # ₹10 Lakh (used in BACKTEST mode or as fallback)
 INTRADAY_ALLOCATION = 0.70  # 70%
 SWING_ALLOCATION = 0.30  # 30%
 
