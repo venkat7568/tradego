@@ -5,10 +5,12 @@ Web Dashboard for TradeGo - Real-time monitoring and control
 from flask import Flask, render_template, jsonify, request
 from datetime import datetime, date
 import json
-import config
+import subprocess
+import psutil
+import signal
 from pnl_engine import get_pnl_engine
-from risk_manager import get_risk_manager
 from upstox_integration import get_upstox_integration
+from settings_manager import load_settings, save_settings
 from logging_config import setup_logging
 
 # Setup logging
@@ -19,8 +21,78 @@ app.config['SECRET_KEY'] = 'tradego-secret-key-change-this'
 
 # Initialize modules
 pnl_engine = get_pnl_engine()
-risk_manager = get_risk_manager()
 upstox_integration = get_upstox_integration()
+
+# Trading system process
+trading_process = None
+
+
+def is_trading_system_running() -> bool:
+    """Check if orchestrator is running"""
+    for proc in psutil.process_iter(['name', 'cmdline']):
+        try:
+            cmdline = proc.info['cmdline']
+            if cmdline and 'orchestrator.py' in ' '.join(cmdline):
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return False
+
+
+def start_trading_system():
+    """Start the trading system"""
+    global trading_process
+    try:
+        if is_trading_system_running():
+            return {'success': False, 'error': 'Trading system already running'}
+
+        # Start orchestrator in background
+        trading_process = subprocess.Popen(
+            ['python', 'orchestrator.py'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+
+        logger.info(f"Trading system started with PID: {trading_process.pid}")
+        return {'success': True, 'pid': trading_process.pid}
+
+    except Exception as e:
+        logger.error(f"Error starting trading system: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def stop_trading_system():
+    """Stop the trading system"""
+    global trading_process
+    try:
+        stopped = False
+
+        # Try to stop the process we started
+        if trading_process and trading_process.poll() is None:
+            trading_process.terminate()
+            trading_process.wait(timeout=5)
+            stopped = True
+
+        # Also check for any running orchestrator processes
+        for proc in psutil.process_iter(['name', 'cmdline']):
+            try:
+                cmdline = proc.info['cmdline']
+                if cmdline and 'orchestrator.py' in ' '.join(cmdline):
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                    stopped = True
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+                pass
+
+        if stopped:
+            logger.info("Trading system stopped")
+            return {'success': True}
+        else:
+            return {'success': False, 'error': 'No trading system process found'}
+
+    except Exception as e:
+        logger.error(f"Error stopping trading system: {e}")
+        return {'success': False, 'error': str(e)}
 
 
 @app.route('/')
@@ -29,16 +101,70 @@ def index():
     return render_template('dashboard.html')
 
 
+@app.route('/api/settings', methods=['GET'])
+def api_get_settings():
+    """Get current trading settings"""
+    try:
+        settings = load_settings()
+
+        # Check if trading system is running
+        is_running = is_trading_system_running()
+
+        return jsonify({
+            'success': True,
+            'data': {
+                **settings,
+                'system_running': is_running
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error in api_get_settings: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/settings', methods=['POST'])
+def api_update_settings():
+    """Update trading settings"""
+    try:
+        new_settings = request.get_json()
+
+        # Validate settings
+        if 'mode' in new_settings and new_settings['mode'] not in ['LIVE', 'BACKTEST']:
+            return jsonify({'success': False, 'error': 'Invalid mode'}), 400
+
+        if 'live_type' in new_settings and new_settings['live_type'] not in ['PAPER', 'REAL']:
+            return jsonify({'success': False, 'error': 'Invalid live_type'}), 400
+
+        if 'capital' in new_settings:
+            try:
+                new_settings['capital'] = float(new_settings['capital'])
+            except:
+                return jsonify({'success': False, 'error': 'Invalid capital amount'}), 400
+
+        # Save settings
+        current = load_settings()
+        updated = {**current, **new_settings}
+
+        if save_settings(updated):
+            logger.info(f"Settings updated: {new_settings}")
+            return jsonify({'success': True, 'data': updated})
+        else:
+            return jsonify({'success': False, 'error': 'Failed to save settings'}), 500
+
+    except Exception as e:
+        logger.error(f"Error in api_update_settings: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/status')
 def api_status():
     """Get system status"""
     try:
-        # Trading mode
-        trading_mode = config.TRADING_MODE
+        settings = load_settings()
 
-        # Get live balance if configured
+        # Get live balance if in LIVE mode with REAL money
         live_balance = None
-        if trading_mode == 'LIVE' and config.FETCH_LIVE_BALANCE:
+        if settings['mode'] == 'LIVE' and settings['live_type'] == 'REAL':
             try:
                 operator = upstox_integration.get_operator()
                 if operator:
@@ -48,15 +174,21 @@ def api_status():
             except Exception as e:
                 logger.error(f"Error fetching live balance: {e}")
 
+        capital = live_balance if live_balance else settings['capital']
+
         return jsonify({
             'success': True,
             'data': {
-                'trading_mode': trading_mode,
-                'is_live': trading_mode == 'LIVE',
-                'capital': live_balance if live_balance else config.TOTAL_CAPITAL,
-                'capital_source': 'upstox' if live_balance else 'config',
-                'max_positions': risk_manager.limits.max_open_positions,
-                'max_daily_loss': f"{risk_manager.limits.max_daily_loss_percent:.1%}",
+                'trading_mode': settings['mode'],
+                'live_type': settings['live_type'],
+                'is_live': settings['mode'] == 'LIVE',
+                'is_real_money': settings['mode'] == 'LIVE' and settings['live_type'] == 'REAL',
+                'capital': capital,
+                'capital_source': 'upstox' if live_balance else 'settings',
+                'max_positions': settings['max_positions'],
+                'max_daily_loss': f"{settings['max_daily_loss_percent']:.1f}%",
+                'auto_trade': settings.get('auto_trade', False),
+                'system_running': is_trading_system_running(),
                 'timestamp': datetime.now().isoformat()
             }
         })
@@ -240,10 +372,39 @@ def api_upstox_positions():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/system/start', methods=['POST'])
+def api_start_system():
+    """Start the trading system"""
+    try:
+        result = start_trading_system()
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+    except Exception as e:
+        logger.error(f"Error in api_start_system: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/system/stop', methods=['POST'])
+def api_stop_system():
+    """Stop the trading system"""
+    try:
+        result = stop_trading_system()
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+    except Exception as e:
+        logger.error(f"Error in api_stop_system: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 def run_dashboard(host='0.0.0.0', port=5000, debug=False):
     """Run the dashboard server"""
+    settings = load_settings()
     logger.info(f"🌐 Starting TradeGo Dashboard on http://{host}:{port}")
-    logger.info(f"   Mode: {config.TRADING_MODE}")
+    logger.info(f"   Mode: {settings['mode']}")
     logger.info(f"   Access the dashboard in your browser")
 
     app.run(host=host, port=port, debug=debug)
