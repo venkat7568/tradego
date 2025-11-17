@@ -14,7 +14,7 @@ from data_layer import get_data_layer
 from signal_engine import get_signal_engine
 from risk_manager import get_risk_manager, RiskLimits
 from upstox_integration import get_upstox_integration
-import config
+from settings_manager import load_settings
 
 # Setup logging with UTF-8 support
 logger = setup_logging(__name__)
@@ -23,10 +23,11 @@ logger = setup_logging(__name__)
 class Orchestrator:
     """Main trading system orchestrator"""
 
-    def __init__(self, trading_mode: str = None):
-        # Trading mode: LIVE or BACKTEST
-        self.trading_mode = trading_mode or config.TRADING_MODE
-        self.fetch_live_balance = config.FETCH_LIVE_BALANCE if self.trading_mode == 'LIVE' else False
+    def __init__(self):
+        # Load settings from dashboard UI (settings_manager)
+        self.settings = load_settings()
+        self.trading_mode = self.settings['mode']
+        self.live_type = self.settings.get('live_type', 'PAPER')
 
         # Initialize all modules
         self.pnl_engine = get_pnl_engine()
@@ -38,40 +39,33 @@ class Orchestrator:
         # Trading state
         self.trading_enabled = True
         self.last_scan_time = None
-        self.live_balance = None  # Will be fetched from broker in LIVE mode
+        self.live_balance = None
 
         logger.info("=" * 60)
-        logger.info(f"TradeGo Orchestrator Initialized - Mode: {self.trading_mode}")
+        logger.info(f"TradeGo Orchestrator Initialized")
+        logger.info(f"Mode: {self.trading_mode} ({self.live_type if self.trading_mode == 'LIVE' else 'Paper Trading'})")
+        logger.info(f"Settings: {self.settings}")
         logger.info("=" * 60)
 
-    def fetch_live_balance(self) -> float:
-        """
-        Fetch available balance from Upstox broker
-        Returns the available margin for trading
-        """
-        if self.trading_mode != 'LIVE' or not self.fetch_live_balance:
-            return config.TOTAL_CAPITAL
+    def get_capital(self) -> float:
+        """Get trading capital based on mode"""
+        # LIVE + REAL = Fetch from Upstox
+        if self.trading_mode == 'LIVE' and self.live_type == 'REAL':
+            try:
+                operator = self.upstox_integration.get_operator()
+                if operator:
+                    funds = operator.get_funds()
+                    if funds.get('status') == 'ok':
+                        available = funds.get('equity', {}).get('available_margin', 0)
+                        logger.info(f"💰 Live balance from Upstox: ₹{available:,.2f}")
+                        self.live_balance = available
+                        return available
+                logger.warning("⚠️  Failed to fetch Upstox balance, using settings capital")
+            except Exception as e:
+                logger.error(f"❌ Error fetching live balance: {e}")
 
-        try:
-            operator = self.upstox_integration.get_operator()
-            if not operator:
-                logger.warning("⚠️  Unable to get Upstox operator. Using config capital.")
-                return config.TOTAL_CAPITAL
-
-            funds = operator.get_funds()
-            if funds.get('status') == 'ok':
-                equity = funds.get('equity', {})
-                available = equity.get('available_margin', 0)
-                logger.info(f"💰 Live balance fetched: ₹{available:,.2f}")
-                self.live_balance = available
-                return available
-            else:
-                logger.warning(f"⚠️  Failed to fetch funds: {funds.get('error')}")
-                return config.TOTAL_CAPITAL
-
-        except Exception as e:
-            logger.error(f"❌ Error fetching live balance: {e}")
-            return config.TOTAL_CAPITAL
+        # BACKTEST or LIVE+PAPER = Use settings capital
+        return self.settings.get('capital', 1000000)
 
     def is_market_open(self) -> bool:
         """Check if market is open"""
@@ -113,8 +107,10 @@ class Orchestrator:
             logger.info(f"Open Positions: {len(open_trades)}")
 
             # Check circuit breaker
-            daily_loss_percent = portfolio.total_pnl / self.risk_manager.limits.total_capital
-            if daily_loss_percent < -self.risk_manager.limits.max_daily_loss_percent:
+            capital = self.get_capital()
+            daily_loss_percent = portfolio.total_pnl / capital
+            max_loss_pct = self.settings.get('max_daily_loss_percent', 2.0) / 100
+            if daily_loss_percent < -max_loss_pct:
                 logger.warning(f"⚠️  CIRCUIT BREAKER TRIGGERED: {daily_loss_percent:.2%} daily loss")
                 self.trading_enabled = False
                 return
@@ -185,7 +181,8 @@ class Orchestrator:
                         open_trades = self.pnl_engine.get_open_trades()  # Refresh list
 
                         # Stop if we've reached max positions
-                        if len(open_trades) >= self.risk_manager.limits.max_open_positions:
+                        max_pos = self.settings.get('max_positions', 5)
+                        if len(open_trades) >= max_pos:
                             logger.info(f"\n  ✅ Max positions reached. Stopping execution.")
                             break
 
@@ -208,9 +205,9 @@ class Orchestrator:
             target_order_id = None
             sl_order_id = None
 
-            # LIVE MODE: Place real order through Upstox
-            if self.trading_mode == 'LIVE':
-                logger.info(f"  🔴 LIVE MODE: Placing real order on Upstox...")
+            # LIVE + REAL: Place real order through Upstox
+            if self.trading_mode == 'LIVE' and self.live_type == 'REAL':
+                logger.info(f"  🔴 LIVE MODE (REAL MONEY): Placing real order on Upstox...")
 
                 operator = self.upstox_integration.get_operator()
                 if not operator:
@@ -223,7 +220,7 @@ class Orchestrator:
                     side=signal.direction,
                     qty=position_size.quantity,
                     price=signal.entry_price if signal.entry_price else None,
-                    order_type='MARKET',  # Can be made configurable
+                    order_type='MARKET',
                     product=signal.product,
                     stop_loss=signal.stop_loss,
                     target=signal.target,
@@ -245,8 +242,9 @@ class Orchestrator:
                     return False
 
             else:
-                # BACKTEST MODE: Paper trading
-                logger.info(f"  📝 BACKTEST MODE: Creating paper trade...")
+                # BACKTEST or LIVE+PAPER: Paper trading
+                mode_str = "LIVE (PAPER)" if self.trading_mode == 'LIVE' else "BACKTEST"
+                logger.info(f"  📝 {mode_str} MODE: Creating paper trade...")
 
             # Create trade record in database (for both LIVE and BACKTEST)
             trade = self.pnl_engine.create_trade(
@@ -336,19 +334,25 @@ class Orchestrator:
     def run(self):
         """Start the orchestrator"""
         logger.info("\n🚀 TradeGo System Starting...")
-        logger.info(f"   Mode: {'🔴 LIVE TRADING' if self.trading_mode == 'LIVE' else '📝 BACKTEST (Paper Trading)'}")
 
-        # Fetch live balance if in LIVE mode
-        if self.trading_mode == 'LIVE' and self.fetch_live_balance:
-            live_capital = self.fetch_live_balance()
-            logger.info(f"   Capital: ₹{live_capital:,.2f} (fetched from Upstox)")
+        # Display mode
+        if self.trading_mode == 'LIVE' and self.live_type == 'REAL':
+            logger.info(f"   Mode: 🔴 LIVE (REAL MONEY)")
+        elif self.trading_mode == 'LIVE' and self.live_type == 'PAPER':
+            logger.info(f"   Mode: 📝 LIVE (PAPER TRADING)")
         else:
-            logger.info(f"   Capital: ₹{self.risk_manager.limits.total_capital:,.0f} (config)")
+            logger.info(f"   Mode: 📝 BACKTEST")
 
-        logger.info(f"   Intraday: {self.risk_manager.limits.intraday_allocation:.0%}")
-        logger.info(f"   Swing: {self.risk_manager.limits.swing_allocation:.0%}")
-        logger.info(f"   Max Positions: {self.risk_manager.limits.max_open_positions}")
-        logger.info(f"   Max Daily Loss: {self.risk_manager.limits.max_daily_loss_percent:.0%}")
+        # Display capital
+        capital = self.get_capital()
+        capital_source = "Upstox" if self.live_balance else "Settings"
+        logger.info(f"   Capital: ₹{capital:,.2f} ({capital_source})")
+
+        # Display settings
+        logger.info(f"   Intraday: {self.settings.get('intraday_allocation', 0.7):.0%}")
+        logger.info(f"   Swing: {self.settings.get('swing_allocation', 0.3):.0%}")
+        logger.info(f"   Max Positions: {self.settings.get('max_positions', 5)}")
+        logger.info(f"   Max Daily Loss: {self.settings.get('max_daily_loss_percent', 2)}%")
 
         # Schedule jobs
         schedule.every(15).minutes.do(self.main_trading_loop)
