@@ -296,20 +296,70 @@ class Orchestrator:
 
             for trade in open_trades:
                 try:
-                    # Get current price (TODO: Replace with real Upstox price)
-                    # For now, use a dummy price
-                    # current_price = self.upstox.get_ltp(trade.symbol)
+                    # Get current live price
+                    operator = self.upstox_integration.get_operator()
+                    current_price = None
+
+                    if operator:
+                        current_price = operator.get_ltp(symbol=trade.symbol)
+
+                    if not current_price:
+                        logger.debug(f"Could not get live price for {trade.symbol}, skipping...")
+                        continue
 
                     # Update MAE/MFE
-                    # self.pnl_engine.update_position(trade.trade_id, current_price)
+                    self.pnl_engine.update_position(trade.trade_id, current_price)
+
+                    # Check stop-loss and target for LIVE+REAL mode
+                    if self.trading_mode == 'LIVE' and self.live_type == 'REAL':
+                        if trade.direction == 'BUY':
+                            # Long position
+                            if current_price <= trade.stop_loss:
+                                logger.warning(f"⚠️ STOP-LOSS HIT: {trade.symbol} @ {current_price} (SL: {trade.stop_loss})")
+                                # Square off position
+                                square_result = operator.square_off(symbol=trade.symbol, live=True)
+                                if square_result.get('status') == 'success':
+                                    self.pnl_engine.close_trade(trade.trade_id, current_price, "STOP_LOSS")
+                                    logger.info(f"  ✅ Position squared off at stop-loss")
+
+                            elif current_price >= trade.target:
+                                logger.info(f"✅ TARGET HIT: {trade.symbol} @ {current_price} (TGT: {trade.target})")
+                                # Square off position
+                                square_result = operator.square_off(symbol=trade.symbol, live=True)
+                                if square_result.get('status') == 'success':
+                                    self.pnl_engine.close_trade(trade.trade_id, current_price, "TARGET")
+                                    logger.info(f"  ✅ Position squared off at target")
+
+                        else:  # SHORT position
+                            # Short position
+                            if current_price >= trade.stop_loss:
+                                logger.warning(f"⚠️ STOP-LOSS HIT: {trade.symbol} @ {current_price} (SL: {trade.stop_loss})")
+                                square_result = operator.square_off(symbol=trade.symbol, live=True)
+                                if square_result.get('status') == 'success':
+                                    self.pnl_engine.close_trade(trade.trade_id, current_price, "STOP_LOSS")
+                                    logger.info(f"  ✅ Position squared off at stop-loss")
+
+                            elif current_price <= trade.target:
+                                logger.info(f"✅ TARGET HIT: {trade.symbol} @ {current_price} (TGT: {trade.target})")
+                                square_result = operator.square_off(symbol=trade.symbol, live=True)
+                                if square_result.get('status') == 'success':
+                                    self.pnl_engine.close_trade(trade.trade_id, current_price, "TARGET")
+                                    logger.info(f"  ✅ Position squared off at target")
 
                     # Check if near EOD for intraday trades
                     if trade.product == 'I':
                         now = datetime.now()
                         if now.hour == 15 and now.minute >= 20:
                             logger.info(f"  📤 EOD Square-off: {trade.symbol}")
-                            # TODO: Square off intraday position
-                            # self.pnl_engine.close_trade(trade.trade_id, current_price, "EOD_SQUAREOFF")
+                            if self.trading_mode == 'LIVE' and self.live_type == 'REAL' and operator:
+                                square_result = operator.square_off(symbol=trade.symbol, live=True)
+                                if square_result.get('status') == 'success':
+                                    self.pnl_engine.close_trade(trade.trade_id, current_price, "EOD_SQUAREOFF")
+                                    logger.info(f"  ✅ Intraday position squared off before market close")
+                            else:
+                                # Paper trading mode
+                                self.pnl_engine.close_trade(trade.trade_id, current_price, "EOD_SQUAREOFF")
+                                logger.info(f"  ✅ Intraday position closed (paper)")
 
                 except Exception as e:
                     logger.error(f"Error monitoring {trade.trade_id}: {e}")
@@ -384,11 +434,58 @@ class Orchestrator:
                 schedule.run_pending()
                 time.sleep(1)
             except KeyboardInterrupt:
-                logger.info("\n⏹️  System stopped by user")
+                logger.info("\n⏹️  System shutdown requested by user")
+                self._safe_shutdown()
                 break
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
                 time.sleep(60)  # Wait 1 minute before retrying
+
+    def _safe_shutdown(self):
+        """
+        Safely shutdown the system:
+        - Cancel pending orders
+        - Optionally square off positions (for INTRADAY only)
+        - Save final state
+        """
+        logger.info("\n" + "=" * 60)
+        logger.info("INITIATING SAFE SHUTDOWN")
+        logger.info("=" * 60)
+
+        try:
+            # Get open trades
+            open_trades = self.pnl_engine.get_open_trades()
+
+            if open_trades:
+                logger.info(f"\n⚠️  {len(open_trades)} open positions found")
+
+                for trade in open_trades:
+                    logger.info(f"  • {trade.symbol} ({trade.direction}) - {trade.product}")
+
+                    # Auto square-off INTRADAY positions on shutdown
+                    if trade.product == 'I' and self.trading_mode == 'LIVE' and self.live_type == 'REAL':
+                        logger.warning(f"  ⚠️ Auto-squaring off INTRADAY position: {trade.symbol}")
+                        operator = self.upstox_integration.get_operator()
+                        if operator:
+                            square_result = operator.square_off(symbol=trade.symbol, live=True)
+                            if square_result.get('status') == 'success':
+                                # Get final price
+                                final_price = operator.get_ltp(symbol=trade.symbol) or trade.entry_price
+                                self.pnl_engine.close_trade(trade.trade_id, final_price, "SHUTDOWN_SQUAREOFF")
+                                logger.info(f"    ✅ Position squared off")
+                            else:
+                                logger.error(f"    ❌ Failed to square off: {square_result.get('error')}")
+                    elif trade.product == 'D':
+                        logger.info(f"  ℹ️  DELIVERY position {trade.symbol} - keeping open (will carry forward)")
+
+            # Generate final summary
+            self.daily_summary()
+
+            logger.info("\n✅ Shutdown complete")
+            logger.info("=" * 60)
+
+        except Exception as e:
+            logger.error(f"Error during safe shutdown: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

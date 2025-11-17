@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 
 from data_layer import get_data_layer, Signal
+from strategy_analyzer import get_strategy_analyzer
 
 logger = logging.getLogger(__name__)
 
@@ -21,14 +22,22 @@ class SignalEngine:
 
     def __init__(self):
         self.data_layer = get_data_layer()
-        logger.info("Signal Engine initialized")
+        self.strategy_analyzer = get_strategy_analyzer()
+        logger.info("Signal Engine initialized with strategy analyzer")
 
     def generate_signals(self, symbols: List[str]) -> List[Signal]:
         """
         Generate signals for all symbols using all strategies
+        Applies confidence multipliers based on past performance (LEARNING)
         Returns list of high-confidence signals
         """
         all_signals = []
+
+        # Analyze past strategy performance first
+        try:
+            self.strategy_analyzer.analyze_strategy_performance(days=30)
+        except Exception as e:
+            logger.warning(f"Could not analyze strategy performance: {e}")
 
         for symbol in symbols:
             try:
@@ -37,10 +46,24 @@ class SignalEngine:
                 signal_2 = self.technical_breakout_strategy(symbol)
                 signal_3 = self.mean_reversion_strategy(symbol)
 
-                # Collect valid signals
+                # Collect valid signals and apply learning-based multipliers
                 for signal in [signal_1, signal_2, signal_3]:
-                    if signal and signal.confidence >= 0.65:  # Minimum threshold
-                        all_signals.append(signal)
+                    if signal:
+                        # LEARNING: Apply confidence multiplier based on past performance
+                        multiplier = self.strategy_analyzer.get_strategy_multiplier(signal.strategy)
+                        original_confidence = signal.confidence
+                        signal.confidence = min(0.95, signal.confidence * multiplier)  # Cap at 0.95
+
+                        if signal.confidence != original_confidence:
+                            logger.debug(f"  {signal.strategy}: confidence {original_confidence:.2f} -> {signal.confidence:.2f} (x{multiplier:.2f})")
+
+                        # Filter by adjusted confidence
+                        if signal.confidence >= 0.65:  # Minimum threshold
+                            # Check if strategy should still be traded
+                            if self.strategy_analyzer.should_trade_strategy(signal.strategy):
+                                all_signals.append(signal)
+                            else:
+                                logger.debug(f"  Skipping {signal.strategy} - poor historical performance")
 
             except Exception as e:
                 logger.error(f"Error generating signals for {symbol}: {e}")
@@ -48,7 +71,7 @@ class SignalEngine:
         # Sort by confidence (highest first)
         all_signals.sort(key=lambda x: x.confidence, reverse=True)
 
-        logger.info(f"Generated {len(all_signals)} signals from {len(symbols)} symbols")
+        logger.info(f"Generated {len(all_signals)} signals from {len(symbols)} symbols (after learning adjustments)")
         return all_signals
 
     # ==================== STRATEGY 1: NEWS MOMENTUM ====================

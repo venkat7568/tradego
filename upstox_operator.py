@@ -276,6 +276,98 @@ class UpstoxOperator:
             }
         return None
 
+    #  ---------- order management API ----------
+    def cancel_order(self, order_id: str) -> Tuple[int, Dict[str, Any]]:
+        """
+        Cancel a pending order.
+
+        Args:
+            order_id: Upstox order ID to cancel
+
+        Returns:
+            Tuple of (status_code, response_dict)
+        """
+        if not order_id:
+            return 400, {"error": "order_id required"}
+
+        log.info(f"Cancelling order {order_id}")
+        status, data = self._delete(f"/v2/order/cancel/{order_id}")
+
+        if status == 200:
+            log.info(f"✅ Order {order_id} cancelled successfully")
+        else:
+            log.error(f"❌ Failed to cancel order {order_id}: {data}")
+
+        return status, data
+
+    def get_order_status(self, order_id: str) -> Tuple[int, Dict[str, Any]]:
+        """
+        Get order details and status.
+
+        Args:
+            order_id: Upstox order ID
+
+        Returns:
+            Tuple of (status_code, order_details)
+
+        Order status values:
+            - 'complete' - Order filled
+            - 'open' - Order pending
+            - 'cancelled' - Order cancelled
+            - 'rejected' - Order rejected
+        """
+        if not order_id:
+            return 400, {"error": "order_id required"}
+
+        log.debug(f"Fetching status for order {order_id}")
+        status, data = self._get(f"/v2/order/details/{order_id}")
+
+        if status == 200 and isinstance(data, dict):
+            order_status = data.get("data", {}).get("order_status", "unknown")
+            log.debug(f"Order {order_id} status: {order_status}")
+
+        return status, data
+
+    def verify_order_filled(self, order_id: str, max_retries: int = 3, wait_seconds: float = 1.0) -> bool:
+        """
+        Verify an order was filled by checking its status.
+
+        Args:
+            order_id: Upstox order ID
+            max_retries: Number of times to check status
+            wait_seconds: Seconds to wait between checks
+
+        Returns:
+            True if order is filled (complete), False otherwise
+        """
+        if not order_id:
+            return False
+
+        for attempt in range(max_retries):
+            status, data = self.get_order_status(order_id)
+
+            if status == 200 and isinstance(data, dict):
+                order_status = data.get("data", {}).get("order_status", "").lower()
+
+                if order_status == "complete":
+                    log.info(f"✅ Order {order_id} FILLED")
+                    return True
+                elif order_status in ["rejected", "cancelled"]:
+                    log.warning(f"⚠️ Order {order_id} {order_status.upper()}")
+                    return False
+                else:
+                    # Still pending
+                    if attempt < max_retries - 1:
+                        log.debug(f"Order {order_id} status: {order_status}, waiting {wait_seconds}s...")
+                        time.sleep(wait_seconds)
+            else:
+                log.error(f"Failed to get order status: {data}")
+                if attempt < max_retries - 1:
+                    time.sleep(wait_seconds)
+
+        log.warning(f"⚠️ Could not verify order {order_id} was filled after {max_retries} attempts")
+        return False
+
     # ---------- helpers ----------
     def _resolve(self, symbol_or_name_or_isin_or_key: str) -> Dict[str, Any]:
         q = (symbol_or_name_or_isin_or_key or "").strip()
@@ -291,6 +383,29 @@ class UpstoxOperator:
         if candles and len(candles[0]) >= 5:
             return float(candles[0][4])
         return None
+
+    def get_ltp(self, symbol: Optional[str] = None, instrument_key: Optional[str] = None) -> Optional[float]:
+        """
+        Get Last Traded Price (LTP) for a symbol.
+
+        Args:
+            symbol: Trading symbol (e.g., 'RELIANCE')
+            instrument_key: Instrument key (e.g., 'NSE_EQ|INE002A01018')
+
+        Returns:
+            Current price as float, or None if unavailable
+        """
+        if not instrument_key:
+            if not symbol:
+                return None
+            row = self._resolve(symbol)
+            instrument_key = row.get("instrument_key")
+
+        if not instrument_key:
+            log.warning(f"Could not resolve instrument key for {symbol}")
+            return None
+
+        return self._current_price(instrument_key)
 
     def _compute_levels(
         self,
@@ -685,11 +800,32 @@ class UpstoxOperator:
                 "request": payload,
             }
 
+        entry_order_id = (data.get("data") or {}).get("order_id")
         entry = {
             "status": "success",
-            "order_id": (data.get("data") or {}).get("order_id"),
+            "order_id": entry_order_id,
             "data": data.get("data"),
         }
+
+        # CRITICAL: Verify entry order was filled
+        if entry_order_id:
+            filled = self.verify_order_filled(entry_order_id, max_retries=5, wait_seconds=0.5)
+            if not filled:
+                log.error(f"❌ CRITICAL: Entry order {entry_order_id} NOT FILLED - cancelling")
+                self.cancel_order(entry_order_id)
+                return {
+                    "error": "entry_not_filled",
+                    "message": "Entry order was not filled, order cancelled",
+                    "entry_order_id": entry_order_id,
+                    "request": payload,
+                }
+        else:
+            log.error("❌ CRITICAL: No order ID returned from entry order")
+            return {
+                "error": "no_order_id",
+                "response": data,
+                "request": payload,
+            }
 
         # 2) Place exit orders (LIMIT target + SL-M stop)
         exit_side = "SELL" if side.upper() == "BUY" else "BUY"
@@ -752,15 +888,49 @@ class UpstoxOperator:
                     "data": data_sl.get("data"),
                 }
             else:
-                warnings.append(f"Stop-loss order failed (http={st_sl})")
+                # CRITICAL: SL order failed - position is UNPROTECTED!
+                log.error(f"❌ CRITICAL: Stop-loss order FAILED (http={st_sl}) - SQUARING OFF POSITION IMMEDIATELY!")
+                warnings.append(f"Stop-loss order failed (http={st_sl}) - EMERGENCY SQUARE OFF")
                 exits["stop_loss"] = {
                     "error": "stop_failed",
                     "status": st_sl,
                     "response": data_sl,
                     "request": sl_payload,
                 }
+
+                # EMERGENCY: Square off the position immediately
+                log.warning(f"⚠️ EMERGENCY SQUARE OFF: Position unprotected, closing immediately")
+                square_off_result = self.square_off(symbol=symbol, instrument_key=ik, live=True)
+
+                if square_off_result.get("status") == "success":
+                    log.info(f"✅ Emergency square-off successful")
+                    return {
+                        "error": "sl_failed_position_squared_off",
+                        "message": "Stop-loss failed, position was squared off for safety",
+                        "entry": entry,
+                        "square_off": square_off_result,
+                        "warnings": warnings,
+                    }
+                else:
+                    log.error(f"❌ CRITICAL: Emergency square-off also failed! Position is UNPROTECTED!")
+                    return {
+                        "error": "sl_failed_square_off_failed",
+                        "message": "CRITICAL: Stop-loss AND square-off both failed - MANUAL INTERVENTION REQUIRED!",
+                        "entry": entry,
+                        "square_off_error": square_off_result,
+                        "warnings": warnings,
+                    }
         else:
+            # Stop-loss is None - cannot proceed
             warnings.append("Computed stop-loss is None; no SL-M exit order placed.")
+            log.error(f"❌ CRITICAL: Cannot place trade without stop-loss - squaring off entry")
+            square_off_result = self.square_off(symbol=symbol, instrument_key=ik, live=True)
+            return {
+                "error": "no_stop_loss",
+                "message": "Cannot trade without stop-loss, entry squared off",
+                "entry": entry,
+                "square_off": square_off_result,
+            }
 
         # Exit status summary
         if exits["stop_loss"] and (not isinstance(exits["stop_loss"], dict) or not exits["stop_loss"].get("error")):
