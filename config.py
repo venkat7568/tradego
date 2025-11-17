@@ -3,6 +3,10 @@ Configuration file for TradeGo system
 """
 
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Capital & Risk Settings
 TOTAL_CAPITAL = 1_000_000  # ₹10 Lakh
