@@ -14,7 +14,7 @@ from pnl_engine import get_pnl_engine, Trade
 from data_layer import get_data_layer
 from signal_engine import get_signal_engine
 from risk_manager import get_risk_manager, RiskLimits
-from upstox_operator import UpstoxOperator
+from upstox_integration import get_upstox_integration
 
 # Configure logging
 logging.basicConfig(
@@ -38,7 +38,7 @@ class Orchestrator:
         self.data_layer = get_data_layer()
         self.signal_engine = get_signal_engine()
         self.risk_manager = get_risk_manager()
-        self.upstox = UpstoxOperator()
+        self.upstox_integration = get_upstox_integration()
 
         # Trading state
         self.trading_enabled = True
